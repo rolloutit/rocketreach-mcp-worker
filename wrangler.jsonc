@@ -1,0 +1,9 @@
+{
+  "name": "rocketreach-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Optional: set ROCKETREACH_API_KEY as a secret fallback if no header is sent.
+  // Run: wrangler secret put ROCKETREACH_API_KEY
+  "vars": {}
+}
