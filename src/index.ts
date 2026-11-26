@@ -372,6 +372,50 @@ function buildServer(apiKey: string): McpServer {
 }
 
 // ---------------------------------------------------------------------------
+// Request body limit
+// ---------------------------------------------------------------------------
+
+// MCP JSON-RPC messages for these tools are a few KB at most. The agents
+// transport parses bodies with request.json() without any size bound, so cap
+// them here before anything is parsed.
+const MAX_BODY_BYTES = 1024 * 1024; // 1 MiB
+
+/** Reads the body up to MAX_BODY_BYTES; returns null when it is larger. */
+async function readBoundedBody(request: Request): Promise<Uint8Array | null> {
+  if (Number(request.headers.get("content-length")) > MAX_BODY_BYTES) return null;
+  if (!request.body) return new Uint8Array();
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > MAX_BODY_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+
+  const body = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
+}
+
+function jsonResponse(status: number, data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Worker entry point
 // ---------------------------------------------------------------------------
 
@@ -392,16 +436,26 @@ export default {
       request.headers.get("ROCKETREACH_API_KEY") ?? env.ROCKETREACH_API_KEY ?? null;
 
     if (!apiKey) {
-      return new Response(
-        JSON.stringify({
-          error: "Missing API key. Pass it via the ROCKETREACH_API_KEY header or set the ROCKETREACH_API_KEY Worker secret.",
-        }),
-        { status: 401, headers: { "Content-Type": "application/json" } },
-      );
+      return jsonResponse(401, {
+        error: "Missing API key. Pass it via the ROCKETREACH_API_KEY header or set the ROCKETREACH_API_KEY Worker secret.",
+      });
+    }
+
+    let mcpRequest = request;
+    if (request.body) {
+      const body = await readBoundedBody(request);
+      if (body === null) {
+        return jsonResponse(413, {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: `Payload Too Large: request body must not exceed ${MAX_BODY_BYTES} bytes` },
+          id: null,
+        });
+      }
+      mcpRequest = new Request(request, { body });
     }
 
     const server = buildServer(apiKey);
     const handler = createMcpHandler(server, { route: "/mcp" });
-    return handler(request, env, ctx);
+    return handler(mcpRequest, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
